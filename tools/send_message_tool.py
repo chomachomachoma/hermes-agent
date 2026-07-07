@@ -681,6 +681,24 @@ async def _send_via_adapter(
     try:
         from gateway.platform_registry import platform_registry
         entry = platform_registry.get(platform_name)
+        if entry is None:
+            # In a standalone process (e.g. cron running separately from the
+            # gateway) the registry starts empty — the modules that self-register
+            # PlatformEntry objects on import were never imported.  Populate it:
+            #  * plugin platforms self-register via discover_plugins()
+            #  * built-in platforms with a standalone_sender_fn (currently only
+            #    api_server) register on module import, so import it explicitly.
+            try:
+                from hermes_cli.plugins import discover_plugins
+                discover_plugins()  # idempotent
+            except Exception:
+                pass
+            if platform_name == "api_server":
+                try:
+                    import gateway.platforms.api_server  # noqa: F401 (import registers the PlatformEntry)
+                except Exception:
+                    pass
+            entry = platform_registry.get(platform_name)
     except Exception:
         entry = None
 

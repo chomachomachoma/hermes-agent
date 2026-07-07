@@ -62,6 +62,13 @@ from gateway.platforms.base import (
 )
 from agent.redact import redact_sensitive_text
 
+# NOTE: Registration with the platform registry happens at the BOTTOM of this
+# module, after `_api_server_standalone_send` and `APIServerAdapter` are
+# defined.  Registering here (before those definitions) raised a NameError on
+# `standalone_sender_fn=_api_server_standalone_send` that the guard swallowed,
+# leaving api_server without a standalone sender and breaking out-of-process
+# cron delivery ("No live adapter for platform 'api_server'").
+
 logger = logging.getLogger(__name__)
 
 
@@ -822,6 +829,72 @@ try:
     from tools.cronjob_tools import _scan_cron_prompt as _scan_cron_prompt
 except Exception:  # pragma: no cover - scanner is optional hardening
     _scan_cron_prompt = None
+
+
+async def _api_server_standalone_send(
+    pconfig,
+    chat_id: str,
+    message: str,
+    *,
+    thread_id: Optional[str] = None,
+    media_files=None,
+    force_document: bool = False,
+) -> dict:
+    """
+    Standalone sender for API Server (dashboard) platform.
+
+    Used by cron jobs running in a separate process from the gateway.
+    Mirrors the message into the session database so it appears in the dashboard UI.
+    """
+    try:
+        from hermes_state import SessionDB
+        db = SessionDB()
+    except Exception as e:
+        return {"error": f"SessionDB unavailable: {e}"}
+
+    # The chat_id is the session_id for the dashboard
+    session_id = chat_id
+    session = db.get_session(session_id)
+    if session is None:
+        return {"error": f"Session not found: {session_id}"}
+
+    try:
+        # We already resolved (and verified) the exact target session by id
+        # above, so append to it directly. Do NOT route through
+        # mirror_to_session(): its origin-based sessions.json lookup matches on
+        # ``origin.chat_id == chat_id``, which does not hold for dashboard
+        # sessions (addressed by session_id), so it silently returns False and
+        # the delivered brief is dropped while this sender still reports
+        # success. role="user" keeps replay safe on strict-alternation
+        # providers — same rationale as the mirror path.
+        db.append_message(session_id=session_id, role="user", content=message)
+        return {"success": True, "message_id": session_id}
+    except Exception as e:
+        logger.debug("[api_server] Standalone send failed: %s", e)
+        return {"error": str(e)}
+
+
+# Register with the platform registry for standalone (out-of-process) cron
+# delivery.  This MUST run after `_api_server_standalone_send` is defined —
+# `standalone_sender_fn` is evaluated eagerly here, so a forward reference
+# would raise NameError and silently unregister the platform.  (The
+# adapter_factory lambda captures `APIServerAdapter` lazily, so referencing the
+# class defined just below is fine.)
+try:
+    from gateway.platform_registry import platform_registry, PlatformEntry
+    platform_registry.register(PlatformEntry(
+        name="api_server",
+        label="API Server",
+        adapter_factory=lambda cfg: APIServerAdapter(cfg),
+        check_fn=lambda: True,
+        validate_config=lambda cfg: True,
+        required_env=[],
+        install_hint="built-in",
+        standalone_sender_fn=_api_server_standalone_send,
+    ))
+except Exception:
+    # Registry may not be available at import time (e.g. during tests)
+    pass
 
 
 class APIServerAdapter(BasePlatformAdapter):
@@ -4903,9 +4976,34 @@ class APIServerAdapter(BasePlatformAdapter):
         metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
         """
-        Not used — HTTP request/response cycle handles delivery directly.
+        Handle cron delivery to the dashboard by mirroring content into a session.
+
+        For the API server (dashboard), "sending" a message means storing it in the
+        session database so it appears in the dashboard UI. The chat_id is the
+        session_id, and we append the content as a message.
         """
-        return SendResult(success=False, error="API server uses HTTP request/response, not send()")
+        db = self._ensure_session_db()
+        if db is None:
+            return SendResult(success=False, error="Session database unavailable")
+
+        # The chat_id is the session_id for the dashboard
+        session_id = chat_id
+        session = db.get_session(session_id)
+        if session is None:
+            return SendResult(success=False, error=f"Session not found: {session_id}")
+
+        # Append directly to the session we just resolved by id. Do NOT use
+        # mirror_to_session(): its origin-based sessions.json lookup
+        # (origin.chat_id == chat_id) does not match dashboard sessions
+        # (addressed by session_id), so it silently returns False and drops the
+        # delivered content while still reporting success. This mirrors the
+        # fix in _api_server_standalone_send (the out-of-process cron path).
+        try:
+            db.append_message(session_id=session_id, role="user", content=content)
+            return SendResult(success=True, message_id=session_id)
+        except Exception as e:
+            logger.debug("[%s] Cron delivery append failed: %s", self.name, e)
+            return SendResult(success=False, error=str(e))
 
     async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
         """Return basic info about the API server."""
@@ -4915,3 +5013,37 @@ class APIServerAdapter(BasePlatformAdapter):
             "host": self._host,
             "port": self._port,
         }
+
+    async def create_handoff_thread(self, parent_chat_id: str, name: str) -> Optional[str]:
+        """
+        Create a fresh dashboard session (thread) for a continuable cron job.
+
+        For the API server (dashboard), a "thread" is a new session that appears
+        as a separate conversation in the dashboard UI. The parent_chat_id is
+        the dashboard's main chat identifier (e.g., the user's dashboard session).
+        """
+        db = self._ensure_session_db()
+        if db is None:
+            logger.debug("[%s] SessionDB unavailable, cannot create handoff thread", self.name)
+            return None
+
+        # Generate a unique session ID for this cron thread
+        import time
+        import uuid
+        safe_name = "".join(c if c.isalnum() or c in "-_" else "_" for c in name.lower().replace(" ", "-"))
+        thread_session_id = f"cron_{safe_name}_{int(time.time())}_{uuid.uuid4().hex[:8]}"
+
+        try:
+            db.create_session(
+                thread_session_id,
+                "api_server",
+                model=self._model_name,
+                system_prompt=f"Cron job thread: {name}\n\nThis is a dedicated thread for the continuable cron job '{name}'. Replies in this thread continue the conversation with full context.",
+            )
+            # Mark as a cron thread for UI filtering
+            db.set_session_title(thread_session_id, f"📅 {name}")
+            logger.info("[%s] Created cron handoff thread: %s", self.name, thread_session_id)
+            return thread_session_id
+        except Exception as e:
+            logger.debug("[%s] Failed to create cron handoff thread: %s", self.name, e)
+            return None
