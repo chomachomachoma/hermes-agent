@@ -1316,6 +1316,31 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
 
     Returns None on success, or an error string on failure.
     """
+    # deliver="new_conversation": publish this run's output as a FRESH
+    # dashboard conversation instead of appending to any existing session.
+    # Intercepted before target resolution on purpose — "new_conversation"
+    # is a delivery *mode*, not a platform name, and must never reach
+    # _resolve_delivery_targets / platform parsing. Each run creates its own
+    # dated conversation (source="api_server"), which sorts to the top of the
+    # dashboard list and keeps per-conversation context bounded.
+    if _normalize_deliver_value(job.get("deliver", "local")) == "new_conversation":
+        from datetime import datetime, timezone
+
+        title = f"{job.get('name') or job.get('id', 'cron')} — {datetime.now(timezone.utc).strftime('%Y-%m-%d')}"
+        try:
+            from gateway.dashboard_conversations import post_new_conversation
+
+            result = post_new_conversation(title, content)
+            logger.info(
+                "Job '%s': delivered to new dashboard conversation %s (%r)",
+                job.get("id", "?"), result["session_id"], title,
+            )
+            return None
+        except Exception as e:
+            msg = f"new_conversation delivery failed: {e}"
+            logger.warning("Job '%s': %s", job.get("id", "?"), msg)
+            return msg
+
     targets = _resolve_delivery_targets(job)
     if not targets:
         deliver_value = _normalize_deliver_value(job.get("deliver", "local"))
