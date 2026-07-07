@@ -55,7 +55,9 @@ def _handle(args: dict, **kw) -> str:
     try:
         from gateway.dashboard_conversations import post_new_conversation
 
-        result = post_new_conversation(title, str(message), model=args.get("model"))
+        # `or None` so an explicit empty-string model falls back to the
+        # server default instead of being persisted on the session row.
+        result = post_new_conversation(title, str(message), model=args.get("model") or None)
         return json.dumps({"success": True, **result}, ensure_ascii=False)
     except Exception as e:
         logger.debug("post_new_conversation tool failed", exc_info=True)
