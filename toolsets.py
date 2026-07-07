@@ -59,6 +59,8 @@ _HERMES_CORE_TOOLS = [
     # off every CLI/messaging/cron schema (narrow waist).
     # Session history search
     "session_search",
+    # Post a new dashboard conversation
+    "post_new_conversation",
     # Clarifying questions
     "clarify",
     # Code execution + delegation
@@ -221,6 +223,12 @@ TOOLSETS = {
     "session_search": {
         "description": "Search and recall past conversations with summarization",
         "tools": ["session_search"],
+        "includes": []
+    },
+
+    "conversations": {
+        "description": "Post new dashboard conversations (fresh session per report/brief)",
+        "tools": ["post_new_conversation"],
         "includes": []
     },
 
@@ -416,6 +424,8 @@ TOOLSETS = {
             "todo", "memory",
             # Session history search
             "session_search",
+            # Post a new dashboard conversation
+            "post_new_conversation",
             # Code execution + delegation
             "execute_code", "delegate_task",
             # Cronjob management
