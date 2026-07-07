@@ -1324,9 +1324,7 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
     # dated conversation (source="api_server"), which sorts to the top of the
     # dashboard list and keeps per-conversation context bounded.
     if _normalize_deliver_value(job.get("deliver", "local")) == "new_conversation":
-        from datetime import datetime, timezone
-
-        title = f"{job.get('name') or job.get('id', 'cron')} — {datetime.now(timezone.utc).strftime('%Y-%m-%d')}"
+        title = f"{job.get('name') or job.get('id', 'cron')} — {_hermes_now().strftime('%Y-%m-%d')}"
         try:
             from gateway.dashboard_conversations import post_new_conversation
 

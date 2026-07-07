@@ -68,6 +68,22 @@ def test_failure_returns_error_string(monkeypatch):
     assert "db exploded" in result
 
 
+def test_empty_name_falls_back_to_job_id():
+    from cron.scheduler import _deliver_result
+
+    db = SessionDB()
+    try:
+        before = {s["id"] for s in _api_server_sessions(db)}
+        assert _deliver_result(_job(name=""), "body") is None
+
+        new = [s for s in _api_server_sessions(db) if s["id"] not in before]
+        assert len(new) == 1
+        title = db.get_session_title(new[0]["id"])
+        assert title.startswith("testjob123456 — 20")
+    finally:
+        db.close()
+
+
 def test_other_deliver_modes_unaffected():
     from cron.scheduler import _deliver_result
 
