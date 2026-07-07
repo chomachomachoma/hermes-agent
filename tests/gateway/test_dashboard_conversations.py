@@ -41,6 +41,27 @@ def test_each_call_creates_distinct_session(db):
     b = post_new_conversation("Same Title", "second", db=db)
     assert a["session_id"] != b["session_id"]
 
+    # SessionDB enforces globally-unique titles: both sessions must still end
+    # up with valid, distinct stored titles, the first keeping the requested one.
+    title_a = db.get_session_title(a["session_id"])
+    title_b = db.get_session_title(b["session_id"])
+    assert title_a == "Same Title"
+    assert title_b
+    assert title_a != title_b
+
+
+def test_long_title_is_clamped_to_max_length(db):
+    from gateway.dashboard_conversations import post_new_conversation
+
+    long_title = "x" * 150
+    result = post_new_conversation(long_title, "m", db=db)
+
+    stored = db.get_session_title(result["session_id"])
+    assert stored
+    assert len(stored) <= SessionDB.MAX_TITLE_LENGTH
+    assert result["title"] == stored
+    assert long_title.startswith(stored)
+
 
 def test_source_defaults_to_api_server(db):
     from gateway.dashboard_conversations import post_new_conversation

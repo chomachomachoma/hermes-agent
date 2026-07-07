@@ -62,6 +62,17 @@ def post_new_conversation(
         from hermes_state import SessionDB
         db = SessionDB()
     try:
+        # SessionDB.sanitize_title raises ValueError for titles longer than
+        # MAX_TITLE_LENGTH (measured after whitespace collapse; cleaning never
+        # lengthens a string, so clamping the raw title is sufficient).  Clamp
+        # up front, reserving room for the collision-disambiguation suffix
+        # below, so the ValueError handler only ever sees genuine collisions.
+        max_title_len = getattr(db, "MAX_TITLE_LENGTH", 100)
+        suffix_tag = f" ({suffix})"
+        title_budget = max_title_len - len(suffix_tag)
+        if len(effective_title) > title_budget:
+            effective_title = effective_title[:title_budget].rstrip() or DEFAULT_TITLE
+
         try:
             db.create_session(session_id, source, model=model)
         except Exception as e:
@@ -74,14 +85,23 @@ def post_new_conversation(
             # create multiple conversations with the same title (e.g. a cron
             # job repeatedly delivering a "Daily Report") - disambiguate
             # rather than fail the whole conversation. `suffix` is already
-            # part of session_id, so it's guaranteed unique.
-            effective_title = f"{effective_title} ({suffix})"
+            # part of session_id, so it's guaranteed unique, and the clamp
+            # above guarantees the suffixed title fits MAX_TITLE_LENGTH.
+            effective_title = f"{effective_title}{suffix_tag}"
             try:
                 db.set_session_title(session_id, effective_title)
             except Exception as e:
                 raise RuntimeError(f"failed to set conversation title: {e}") from e
         except Exception as e:
             raise RuntimeError(f"failed to create conversation: {e}") from e
+
+        # sanitize_title may normalize the stored title (control-char removal,
+        # whitespace collapse), so report the title the dashboard will actually
+        # show rather than our pre-sanitization string.
+        try:
+            effective_title = db.get_session_title(session_id) or effective_title
+        except Exception:
+            pass
 
         if (message or "").strip():
             try:
